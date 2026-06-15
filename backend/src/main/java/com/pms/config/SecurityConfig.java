@@ -101,7 +101,8 @@ public class SecurityConfig {
             .authorizeHttpRequests(auth -> auth
 
                 // ── PUBLIC ENDPOINTS (no authentication needed) ──
-
+                // Allow CORS preflight requests
+    .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                 // Authentication endpoints
                 .requestMatchers("/api/auth/**").permitAll()
 
@@ -263,7 +264,10 @@ public class SecurityConfig {
         CorsConfiguration configuration = new CorsConfiguration();
 
         // Allow requests from React dev server and production
-        configuration.setAllowedOriginPatterns(List.of("*"));
+        configuration.setAllowedOrigins(List.of(
+    "http://localhost:5173",
+    "https://patient-management-system-7egq.onrender.com"
+));
 
         // Allow these HTTP methods
         configuration.setAllowedMethods(Arrays.asList(
