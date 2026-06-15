@@ -1,0 +1,79 @@
+# ═══════════════════════════════════════
+# JAVA / SPRING BOOT
+# ═══════════════════════════════════════
+target/
+*.class
+*.jar
+*.war
+*.ear
+.mvn/wrapper/maven-wrapper.jar
+!.mvn/wrapper/maven-wrapper.properties
+
+# IDE
+.idea/
+*.iml
+*.iws
+.eclipse/
+.classpath
+.project
+.settings/
+
+# Spring Boot
+spring-shell.log
+
+# ═══════════════════════════════════════
+# NODE / REACT
+# ═══════════════════════════════════════
+node_modules/
+dist/
+.vite/
+*.local
+
+# ═══════════════════════════════════════
+# PYTHON / FASTAPI
+# ═══════════════════════════════════════
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+.Python
+venv/
+env/
+.venv/
+.env          # Contains secrets — NEVER commit!
+*.egg-info/
+dist/
+build/
+
+# ═══════════════════════════════════════
+# UPLOADS (medical reports)
+# ═══════════════════════════════════════
+uploads/
+*.pdf
+*.jpg
+*.png
+# Except sample files
+!sample-data/
+
+# ═══════════════════════════════════════
+# ENVIRONMENT / SECRETS — CRITICAL!
+# ═══════════════════════════════════════
+.env
+.env.local
+.env.production
+application-local.properties
+secrets.yml
+
+# ═══════════════════════════════════════
+# OS FILES
+# ═══════════════════════════════════════
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# ═══════════════════════════════════════
+# DOCKER
+# ═══════════════════════════════════════
+# Keep docker-compose but ignore override files with secrets
+docker-compose.override.yml
