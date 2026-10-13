@@ -9,7 +9,7 @@ export default defineConfig({
     // This avoids CORS issues in dev mode
     proxy: {
       '/api': {
-        target: 'http://localhost:8080',
+        target: 'https://pms-new-version.onrender.com',
         changeOrigin: true,
       }
     }
