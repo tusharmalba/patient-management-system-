@@ -13,8 +13,13 @@
 import axios from 'axios';
 
 // Create Axios instance with base configuration
+// In production (Render), set VITE_API_URL to the backend's public URL,
+// e.g. https://pms-backend.onrender.com  (no trailing slash, no /api).
+// In local dev it's empty, so '/api' is used and the Vite proxy forwards it.
+const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
+
 const api = axios.create({
-  baseURL: '/api',           // Vite proxy handles: /api → http://localhost:8080/api
+  baseURL: `${API_BASE}/api`,
   timeout: 30000,            // 30 second timeout
   headers: {
     'Content-Type': 'application/json',
