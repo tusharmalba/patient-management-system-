@@ -1,0 +1,20 @@
+# ─── Web Framework ───
+fastapi==0.104.1
+uvicorn[standard]==0.24.0   # ASGI server (like Tomcat for Python)
+
+# ─── Data Validation ───
+pydantic==2.5.0
+
+# ─── AI / ML ───
+openai==1.3.0               # OpenAI GPT API client
+# For local ML (optional — comment out if not using):
+# scikit-learn==1.3.2       # Machine learning algorithms
+# numpy==1.26.2             # Numerical computing
+# pandas==2.1.3             # Data manipulation
+
+# ─── HTTP Client (for Spring Boot communication) ───
+httpx==0.25.2               # Async HTTP client
+
+# ─── Utilities ───
+python-multipart==0.0.6     # File upload support
+python-dotenv==1.0.0        # Load .env files
