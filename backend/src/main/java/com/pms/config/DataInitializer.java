@@ -76,7 +76,7 @@ public class DataInitializer implements CommandLineRunner {
                     .role(Role.ADMIN)
                     .phoneNumber("+910000000000")
                     .enabled(true)
-                    .isDeleted(false)
+                    .setIsDeleted(false)
                     .build();
             userRepository.save(admin);
             log.info("═══════════════════════════════════════════════");
