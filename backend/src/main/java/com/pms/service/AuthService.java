@@ -4,9 +4,15 @@ import com.pms.audit.AuditService;
 import com.pms.dto.request.LoginRequest;
 import com.pms.dto.request.RegisterRequest;
 import com.pms.dto.response.AuthResponse;
+import com.pms.entity.Doctor;
+import com.pms.entity.Patient;
 import com.pms.entity.User;
 import com.pms.enums.AuditAction;
+import com.pms.enums.Priority;
+import com.pms.enums.Role;
 import com.pms.exception.DuplicateResourceException;
+import com.pms.repository.DoctorRepository;
+import com.pms.repository.PatientRepository;
 import com.pms.repository.UserRepository;
 import com.pms.security.jwt.JwtUtil;
 import lombok.RequiredArgsConstructor;
@@ -18,32 +24,41 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * ╔══════════════════════════════════════════════════════════════════════╗
- * ║                        AUTH SERVICE                                  ║
- * ║                                                                       ║
- * ║  Handles user registration and login.                                 ║
- * ║                                                                       ║
- * ║  REGISTRATION FLOW:                                                   ║
- * ║  1. Validate email is unique                                          ║
- * ║  2. Hash the password with BCrypt                                     ║
- * ║  3. Save User entity to DB                                            ║
- * ║  4. Generate JWT token                                                ║
- * ║  5. Return AuthResponse with token                                    ║
- * ║                                                                       ║
- * ║  LOGIN FLOW:                                                          ║
- * ║  1. Call AuthenticationManager.authenticate()                         ║
- * ║     → Loads user via UserDetailsService                               ║
- * ║     → Verifies BCrypt hash matches                                    ║
- * ║     → Throws BadCredentialsException if wrong                         ║
- * ║  2. If successful, load user from DB                                  ║
- * ║  3. Generate JWT token                                                ║
- * ║  4. Return AuthResponse                                               ║
- * ║                                                                       ║
- * ║  @Service → Marks as service layer bean                               ║
- * ║  @Transactional → Wraps method in DB transaction                      ║
- * ║    → If anything fails, entire operation is rolled back               ║
- * ║    → Ensures data consistency                                         ║
- * ╚══════════════════════════════════════════════════════════════════════╝
+ * ═══════════════════════════════════════════════════════════════
+ * AUTH SERVICE — WHAT CHANGED AND WHY
+ * ═══════════════════════════════════════════════════════════════
+ *
+ * ORIGINAL DESIGN (what we built first):
+ *   register() only created a User record in the users table.
+ *   Patient/Doctor profiles were created separately by the Admin
+ *   via POST /api/patients or POST /api/doctors.
+ *
+ * WHY WE THOUGHT THAT WAS FINE:
+ *   In many enterprise systems, user account creation (authentication)
+ *   and profile creation (business data) are intentionally separate.
+ *   A user can exist without a patient profile — e.g. a staff member
+ *   who needs login access but is not a patient.
+ *
+ * WHAT THE BUG TAUGHT US:
+ *   In our PMS, every PATIENT role = a patient in the hospital.
+ *   Every DOCTOR role = a doctor in the hospital.
+ *   There is no case where a PATIENT user exists without a patient record.
+ *   So separating them caused a usability gap: users registered themselves
+ *   but admin couldn't see them in the patients/doctors lists.
+ *
+ * THE FIX:
+ *   register() now auto-creates the matching profile immediately.
+ *   PATIENT registration → users table + patients table (linked via user_id)
+ *   DOCTOR registration  → users table + doctors table  (linked via user_id)
+ *   ADMIN registration   → users table only (admins have no patient/doctor profile)
+ *
+ * KEY TECHNICAL LESSON:
+ *   Lombok @Builder does NOT inherit @Builder.Default from parent classes.
+ *   BaseEntity has `isDeleted = false` with @Builder.Default.
+ *   But Patient.builder().build() ignores that → isDeleted stored as NULL.
+ *   PostgreSQL: NULL != false → patient invisible to all queries!
+ *   Fix: always set .isDeleted(false) explicitly in every builder chain.
+ * ═══════════════════════════════════════════════════════════════
  */
 @Service
 @Slf4j
@@ -51,95 +66,115 @@ import org.springframework.transaction.annotation.Transactional;
 public class AuthService {
 
     private final UserRepository userRepository;
+    private final PatientRepository patientRepository;
+    private final DoctorRepository doctorRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtUtil jwtUtil;
     private final AuthenticationManager authenticationManager;
     private final AuditService auditService;
 
-    /**
-     * Register a new user.
-     *
-     * @Transactional → All DB operations happen in one transaction.
-     * If save() fails → nothing is committed. Atomic operation.
-     */
     @Transactional
     public AuthResponse register(RegisterRequest request) {
-        // ── Step 1: Check email uniqueness ──
         if (userRepository.existsByEmail(request.getEmail())) {
             throw new DuplicateResourceException("User", "email", request.getEmail());
         }
 
-        // ── Step 2: Build User entity from request ──
         User user = User.builder()
                 .firstName(request.getFirstName())
                 .lastName(request.getLastName())
                 .email(request.getEmail())
-                /**
-                 * passwordEncoder.encode() → BCrypt hash the password
-                 * NEVER save plain text! "password123" → "$2a$10$..."
-                 * BCrypt is one-way: you cannot decrypt it back
-                 */
                 .password(passwordEncoder.encode(request.getPassword()))
                 .role(request.getRole())
                 .phoneNumber(request.getPhoneNumber())
                 .enabled(true)
+                .isDeleted(false)   // FIX: explicit false — never rely on @Builder.Default from parent
                 .build();
 
-        // ── Step 3: Save to database ──
         User savedUser = userRepository.save(user);
-        log.info("New user registered: {} with role {}", savedUser.getEmail(), savedUser.getRole());
+        log.info("User registered: {} as {}", savedUser.getEmail(), savedUser.getRole());
 
-        // ── Step 4: Generate JWT ──
+        // Auto-create role-specific profile
+        if (request.getRole() == Role.PATIENT) {
+            createPatientProfile(savedUser);
+        } else if (request.getRole() == Role.DOCTOR) {
+            createDoctorProfile(savedUser);
+        }
+
         String token = jwtUtil.generateToken(savedUser);
-
-        // ── Step 5: Audit log ──
         auditService.log(AuditAction.USER_REGISTERED, "User", savedUser.getId(),
-                "User registered: " + savedUser.getEmail() + " with role " + savedUser.getRole());
+                "User registered: " + savedUser.getEmail() + " as " + savedUser.getRole());
 
         return buildAuthResponse(savedUser, token);
     }
 
     /**
-     * Authenticate user and return JWT token.
+     * Creates a minimal Patient profile linked to the User account.
+     * Admin can later fill in medical details via PUT /api/patients/{id}.
+     *
+     * WHY MINIMAL?
+     * At registration time, we only have name/email/phone.
+     * Medical history, diagnoses, risk factors — those are added by the doctor later.
+     * We set safe defaults so risk calculation works immediately.
      */
-    public AuthResponse login(LoginRequest request) {
-        /**
-         * authenticationManager.authenticate() does ALL of this:
-         * 1. Calls userDetailsService.loadUserByUsername(email) → hits DB
-         * 2. Calls passwordEncoder.matches(rawPassword, hashedPassword)
-         * 3. If password doesn't match → throws BadCredentialsException
-         *    → GlobalExceptionHandler catches it → returns 401
-         * 4. If user not found → throws UsernameNotFoundException
-         *    → Also becomes BadCredentialsException (security: don't reveal if email exists)
-         *
-         * UsernamePasswordAuthenticationToken(principal, credentials)
-         *   principal = email, credentials = plain text password
-         */
-        authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(
-                        request.getEmail(),
-                        request.getPassword()
-                )
-        );
-
-        // If we reach here, authentication succeeded!
-        // Load full user object from DB
-        User user = userRepository.findByEmailAndIsDeletedFalse(request.getEmail())
-                .orElseThrow(() -> new RuntimeException("User not found after authentication"));
-
-        String token = jwtUtil.generateToken(user);
-
-        log.info("User logged in: {}", user.getEmail());
-        auditService.log(AuditAction.USER_LOGIN, "User", user.getId(),
-                "User logged in: " + user.getEmail());
-
-        return buildAuthResponse(user, token);
+    private void createPatientProfile(User user) {
+        if (patientRepository.existsByEmail(user.getEmail())) {
+            log.warn("Patient profile already exists for: {}", user.getEmail());
+            return;
+        }
+        Patient patient = Patient.builder()
+                .user(user)
+                .firstName(user.getFirstName())
+                .lastName(user.getLastName())
+                .email(user.getEmail())
+                .phoneNumber(user.getPhoneNumber())
+                .hasDiabetes(false)
+                .isSmoker(false)
+                .hasHeartDisease(false)
+                .hasHighBloodPressure(false)
+                .priority(Priority.LOW)
+                .isDeleted(false)   // FIX: explicit false — Lombok @Builder.Default not inherited
+                .build();
+        patient.calculateAndSetRiskScore();
+        patientRepository.save(patient);
+        log.info("Patient profile auto-created for: {}", user.getEmail());
     }
 
     /**
-     * Build the AuthResponse DTO from User and token.
-     * Extracts only safe fields (no password!).
+     * Creates a minimal Doctor profile linked to the User account.
+     * Admin can later add specialization, availability etc via PUT /api/doctors/{id}.
      */
+    private void createDoctorProfile(User user) {
+        if (doctorRepository.existsByEmail(user.getEmail())) {
+            log.warn("Doctor profile already exists for: {}", user.getEmail());
+            return;
+        }
+        Doctor doctor = Doctor.builder()
+                .user(user)
+                .firstName(user.getFirstName())
+                .lastName(user.getLastName())
+                .email(user.getEmail())
+                .phoneNumber(user.getPhoneNumber())
+                .specialization("General Medicine")  // Default — doctor updates this later
+                .appointmentDurationMinutes(30)
+                .isDeleted(false)   // FIX: explicit false
+                .build();
+        doctorRepository.save(doctor);
+        log.info("Doctor profile auto-created for: {}", user.getEmail());
+    }
+
+    public AuthResponse login(LoginRequest request) {
+        authenticationManager.authenticate(
+                new UsernamePasswordAuthenticationToken(request.getEmail(), request.getPassword())
+        );
+        User user = userRepository.findByEmailAndIsDeletedFalse(request.getEmail())
+                .orElseThrow(() -> new RuntimeException("User not found after authentication"));
+        String token = jwtUtil.generateToken(user);
+        log.info("User logged in: {}", user.getEmail());
+        auditService.log(AuditAction.USER_LOGIN, "User", user.getId(),
+                "User logged in: " + user.getEmail());
+        return buildAuthResponse(user, token);
+    }
+
     private AuthResponse buildAuthResponse(User user, String token) {
         return AuthResponse.builder()
                 .token(token)
