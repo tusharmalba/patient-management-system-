@@ -5,6 +5,7 @@ import com.pms.enums.RiskLevel;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
@@ -13,117 +14,121 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * ╔══════════════════════════════════════════════════════════════════════╗
- * ║                    PATIENT REPOSITORY                                ║
- * ║                                                                       ║
- * ║  Demonstrates Spring Data JPA query methods AND @Query JPQL           ║
- * ╚══════════════════════════════════════════════════════════════════════╝
+ * ═══════════════════════════════════════════════════════════════
+ * PATIENT REPOSITORY — WHAT CHANGED AND WHY
+ * ═══════════════════════════════════════════════════════════════
+ *
+ * ORIGINAL DESIGN:
+ *   Used Spring Data method naming: findByIsDeletedFalse(pageable)
+ *   Spring generates: WHERE is_deleted = false
+ *
+ * WHY WE THOUGHT THAT WAS FINE:
+ *   The Lombok @Builder.Default on BaseEntity sets isDeleted = false.
+ *   We assumed every new entity would always have isDeleted = false.
+ *   So the query WHERE is_deleted = false should catch everything.
+ *
+ * THE HIDDEN BUG:
+ *   @Builder.Default in a PARENT class (@MappedSuperclass) is NOT
+ *   inherited by Lombok's @Builder in the CHILD class.
+ *
+ *   When you call Patient.builder().build(), Lombok generates a builder
+ *   for Patient's own fields only. The parent fields (id, createdAt,
+ *   isDeleted) are included but WITHOUT their @Builder.Default values.
+ *   So isDeleted = null (Java default for Boolean object).
+ *
+ *   In PostgreSQL: NULL != false → record is INVISIBLE to all queries!
+ *
+ *   This is a Lombok limitation documented in their GitHub issues.
+ *   It only affects inheritance scenarios (@MappedSuperclass).
+ *
+ * THE FIX (two-part):
+ *   Part 1 (AuthService): explicitly set .isDeleted(false) in builder
+ *   Part 2 (this file): ALL queries use (isDeleted = false OR isDeleted IS NULL)
+ *   Part 2 is a safety net — catches any existing NULL records in DB
+ *   AND any future builder calls that forget to set isDeleted.
+ *
+ * ALSO: One-time SQL fix for existing NULL records:
+ *   UPDATE patients SET is_deleted = false WHERE is_deleted IS NULL;
+ * ═══════════════════════════════════════════════════════════════
  */
 @Repository
 public interface PatientRepository extends JpaRepository<Patient, Long> {
 
-    // ─────────────────────────────────────────────
-    // METHOD NAME QUERIES (Spring generates SQL)
-    // ─────────────────────────────────────────────
-
-    /**
-     * Spring parses: findBy + Email + And + IsDeleted + False
-     * Generates: SELECT * FROM patients WHERE email = ? AND is_deleted = 0
-     */
-    Optional<Patient> findByEmailAndIsDeletedFalse(String email);
+    // ── Find active patient by email ──
+    @Query("SELECT p FROM Patient p WHERE p.email = :email AND (p.isDeleted = false OR p.isDeleted IS NULL)")
+    Optional<Patient> findByEmailAndIsDeletedFalse(@Param("email") String email);
 
     boolean existsByEmail(String email);
 
     /**
-     * findAll + Active records with PAGINATION
+     * GET ALL ACTIVE PATIENTS (the core list the admin sees)
      *
-     * Page<Patient> → Result with pagination metadata:
-     *   - content (list of patients)
-     *   - totalElements (total count)
-     *   - totalPages
-     *   - currentPage
-     *   - isFirst/isLast
-     *
-     * Pageable → Contains: page number, page size, sort
+     * CHANGED: findByIsDeletedFalse → custom @Query with NULL check
+     * (isDeleted = false OR isDeleted IS NULL) catches:
+     *   - Properly created records (isDeleted = false)
+     *   - Auto-created profiles where builder forgot explicit false (isDeleted = NULL)
      */
-    Page<Patient> findByIsDeletedFalse(Pageable pageable);
+    @Query("SELECT p FROM Patient p WHERE (p.isDeleted = false OR p.isDeleted IS NULL)")
+    Page<Patient> findAllActive(Pageable pageable);
 
-    /**
-     * Find all high-risk patients for dashboard analytics
-     */
-    List<Patient> findByRiskLevelAndIsDeletedFalse(RiskLevel riskLevel);
+    // ── Risk level filter (dashboard) ──
+    @Query("SELECT p FROM Patient p WHERE p.riskLevel = :riskLevel AND (p.isDeleted = false OR p.isDeleted IS NULL)")
+    List<Patient> findByRiskLevelAndIsDeletedFalse(@Param("riskLevel") RiskLevel riskLevel);
 
-    // ─────────────────────────────────────────────
-    // @Query - JPQL (Java Persistence Query Language)
-    // ─────────────────────────────────────────────
-
-    /**
-     * @Query → Write your own JPQL (not SQL, but similar)
-     *
-     * JPQL uses ENTITY names and FIELD names (not table/column names)
-     * "Patient" = the Java class, "firstName" = the Java field
-     *
-     * LOWER() → case-insensitive search
-     * LIKE '%?%' → contains search
-     * :name → named parameter (bound via @Param)
-     *
-     * This generates SQL like:
-     * SELECT * FROM patients p
-     * WHERE (LOWER(p.first_name) LIKE '%john%' OR LOWER(p.last_name) LIKE '%john%')
-     * AND p.is_deleted = 0
-     */
+    // ── Name search ──
     @Query("SELECT p FROM Patient p WHERE " +
             "(LOWER(p.firstName) LIKE LOWER(CONCAT('%', :name, '%')) OR " +
             "LOWER(p.lastName) LIKE LOWER(CONCAT('%', :name, '%'))) " +
-            "AND p.isDeleted = false")
+            "AND (p.isDeleted = false OR p.isDeleted IS NULL)")
     Page<Patient> searchByName(@Param("name") String name, Pageable pageable);
 
     /**
-     * NATIVE QUERY → Raw SQL (use when JPQL isn't enough)
+     * PRIORITY QUEUE — PostgreSQL native query
      *
-     * nativeQuery = true → Execute as raw PostgreSQL SQL
-     * :#{#pageable.pageSize} → Injects pageable values
+     * CHANGED from MySQL: FIELD() → CASE WHEN
+     * MySQL:      ORDER BY FIELD(priority, 'CRITICAL','HIGH','MEDIUM','LOW')
+     * PostgreSQL: ORDER BY CASE priority WHEN 'CRITICAL' THEN 1 ... END
      *
-     * This query powers the EMERGENCY PRIORITY QUEUE:
-     * Orders by priority (CRITICAL first) then by appointment time
+     * FIELD() is a MySQL-only function. PostgreSQL doesn't have it.
+     * CASE WHEN is standard SQL — works on both databases.
      *
-     * CASE expression → custom priority sort (FIELD() is MySQL-only)
+     * LESSON: Always prefer standard SQL over DB-specific functions
+     * unless you know you'll never migrate databases.
      */
     @Query(value = "SELECT p.* FROM patients p " +
-            "WHERE p.is_deleted = false " +
+            "WHERE (p.is_deleted = false OR p.is_deleted IS NULL) " +
             "ORDER BY CASE p.priority " +
             "  WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2 " +
             "  WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 4 ELSE 5 END, " +
             "p.created_at ASC",
-            countQuery = "SELECT COUNT(*) FROM patients WHERE is_deleted = false",
+            countQuery = "SELECT COUNT(*) FROM patients WHERE (is_deleted = false OR is_deleted IS NULL)",
             nativeQuery = true)
     Page<Patient> findAllOrderByPriority(Pageable pageable);
 
-    /**
-     * Dashboard analytics: count by risk level
-     */
-    @Query("SELECT COUNT(p) FROM Patient p WHERE p.riskLevel = :riskLevel AND p.isDeleted = false")
+    // ── Analytics counts ──
+    @Query("SELECT COUNT(p) FROM Patient p WHERE p.riskLevel = :riskLevel AND (p.isDeleted = false OR p.isDeleted IS NULL)")
     long countByRiskLevel(@Param("riskLevel") RiskLevel riskLevel);
 
-    /**
-     * Most common diagnoses for dashboard
-     * GROUP BY + ORDER BY COUNT → Find most common diseases
-     *
-     * Returns List<Object[]> where each array is [diagnosis, count]
-     */
     @Query("SELECT p.primaryDiagnosis, COUNT(p) as total FROM Patient p " +
-            "WHERE p.primaryDiagnosis IS NOT NULL AND p.isDeleted = false " +
-            "GROUP BY p.primaryDiagnosis " +
-            "ORDER BY total DESC")
+            "WHERE p.primaryDiagnosis IS NOT NULL AND (p.isDeleted = false OR p.isDeleted IS NULL) " +
+            "GROUP BY p.primaryDiagnosis ORDER BY total DESC")
     List<Object[]> findMostCommonDiagnoses(Pageable pageable);
 
-    /**
-     * Find patient by their associated user ID
-     */
-    Optional<Patient> findByUser_IdAndIsDeletedFalse(Long userId);
+    // ── By linked user (for patient login — fetch their own profile) ──
+    @Query("SELECT p FROM Patient p WHERE p.user.id = :userId AND (p.isDeleted = false OR p.isDeleted IS NULL)")
+    Optional<Patient> findByUser_IdAndIsDeletedFalse(@Param("userId") Long userId);
+
+    // ── Total count ──
+    @Query("SELECT COUNT(p) FROM Patient p WHERE (p.isDeleted = false OR p.isDeleted IS NULL)")
+    long countByIsDeletedFalse();
 
     /**
-     * Total count of active (non-deleted) patients
+     * ONE-TIME DATA FIX QUERY
+     * Run this via @Modifying to fix existing NULL records in the database.
+     * Call patientRepository.fixNullIsDeletedRecords() once after deploying.
+     * Or run directly in DB: UPDATE patients SET is_deleted = false WHERE is_deleted IS NULL;
      */
-    long countByIsDeletedFalse();
+    @Modifying
+    @Query("UPDATE Patient p SET p.isDeleted = false WHERE p.isDeleted IS NULL")
+    int fixNullIsDeletedRecords();
 }
