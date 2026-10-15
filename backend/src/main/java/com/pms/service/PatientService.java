@@ -246,7 +246,7 @@ public class PatientService {
      */
     @Transactional(readOnly = true)
     public Page<PatientResponse> getAllPatients(Pageable pageable) {
-        return patientRepository.findByIsDeletedFalse(pageable)
+        return patientRepository.findAllActive(pageable)
                 .map(this::mapToResponse);  // .map() transforms each Patient → PatientResponse
     }
 
