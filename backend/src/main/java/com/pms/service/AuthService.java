@@ -24,41 +24,16 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * ═══════════════════════════════════════════════════════════════
- * AUTH SERVICE — WHAT CHANGED AND WHY
- * ═══════════════════════════════════════════════════════════════
+ * AUTH SERVICE
  *
- * ORIGINAL DESIGN (what we built first):
- *   register() only created a User record in the users table.
- *   Patient/Doctor profiles were created separately by the Admin
- *   via POST /api/patients or POST /api/doctors.
+ * THE REAL FIX FOR "admin can't see self-registered patients/doctors":
+ * the original register() saved only a row in `users`. The `patients` and
+ * `doctors` tables were never touched, so the admin lists (which read those
+ * tables) had nothing to show. register() now creates the matching profile
+ * in the same transaction, linked through user_id.
  *
- * WHY WE THOUGHT THAT WAS FINE:
- *   In many enterprise systems, user account creation (authentication)
- *   and profile creation (business data) are intentionally separate.
- *   A user can exist without a patient profile — e.g. a staff member
- *   who needs login access but is not a patient.
- *
- * WHAT THE BUG TAUGHT US:
- *   In our PMS, every PATIENT role = a patient in the hospital.
- *   Every DOCTOR role = a doctor in the hospital.
- *   There is no case where a PATIENT user exists without a patient record.
- *   So separating them caused a usability gap: users registered themselves
- *   but admin couldn't see them in the patients/doctors lists.
- *
- * THE FIX:
- *   register() now auto-creates the matching profile immediately.
- *   PATIENT registration → users table + patients table (linked via user_id)
- *   DOCTOR registration  → users table + doctors table  (linked via user_id)
- *   ADMIN registration   → users table only (admins have no patient/doctor profile)
- *
- * KEY TECHNICAL LESSON:
- *   Lombok @Builder does NOT inherit @Builder.Default from parent classes.
- *   BaseEntity has `isDeleted = false` with @Builder.Default.
- *   But Patient.builder().build() ignores that → isDeleted stored as NULL.
- *   PostgreSQL: NULL != false → patient invisible to all queries!
- *   Fix: always set .isDeleted(false) explicitly in every builder chain.
- * ═══════════════════════════════════════════════════════════════
+ * NOTE: nothing here touches isDeleted. BaseEntity already initialises it to
+ * false, and the entity constructors run that initialiser.
  */
 @Service
 @Slf4j
@@ -87,13 +62,11 @@ public class AuthService {
                 .role(request.getRole())
                 .phoneNumber(request.getPhoneNumber())
                 .enabled(true)
-                .isDeleted(false)   // FIX: explicit false — never rely on @Builder.Default from parent
                 .build();
 
         User savedUser = userRepository.save(user);
         log.info("User registered: {} as {}", savedUser.getEmail(), savedUser.getRole());
 
-        // Auto-create role-specific profile
         if (request.getRole() == Role.PATIENT) {
             createPatientProfile(savedUser);
         } else if (request.getRole() == Role.DOCTOR) {
@@ -107,15 +80,6 @@ public class AuthService {
         return buildAuthResponse(savedUser, token);
     }
 
-    /**
-     * Creates a minimal Patient profile linked to the User account.
-     * Admin can later fill in medical details via PUT /api/patients/{id}.
-     *
-     * WHY MINIMAL?
-     * At registration time, we only have name/email/phone.
-     * Medical history, diagnoses, risk factors — those are added by the doctor later.
-     * We set safe defaults so risk calculation works immediately.
-     */
     private void createPatientProfile(User user) {
         if (patientRepository.existsByEmail(user.getEmail())) {
             log.warn("Patient profile already exists for: {}", user.getEmail());
@@ -132,17 +96,12 @@ public class AuthService {
                 .hasHeartDisease(false)
                 .hasHighBloodPressure(false)
                 .priority(Priority.LOW)
-                .isDeleted(false)   // FIX: explicit false — Lombok @Builder.Default not inherited
                 .build();
         patient.calculateAndSetRiskScore();
         patientRepository.save(patient);
         log.info("Patient profile auto-created for: {}", user.getEmail());
     }
 
-    /**
-     * Creates a minimal Doctor profile linked to the User account.
-     * Admin can later add specialization, availability etc via PUT /api/doctors/{id}.
-     */
     private void createDoctorProfile(User user) {
         if (doctorRepository.existsByEmail(user.getEmail())) {
             log.warn("Doctor profile already exists for: {}", user.getEmail());
@@ -154,9 +113,8 @@ public class AuthService {
                 .lastName(user.getLastName())
                 .email(user.getEmail())
                 .phoneNumber(user.getPhoneNumber())
-                .specialization("General Medicine")  // Default — doctor updates this later
+                .specialization("General Medicine")
                 .appointmentDurationMinutes(30)
-                .isDeleted(false)   // FIX: explicit false
                 .build();
         doctorRepository.save(doctor);
         log.info("Doctor profile auto-created for: {}", user.getEmail());
@@ -164,8 +122,7 @@ public class AuthService {
 
     public AuthResponse login(LoginRequest request) {
         authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(request.getEmail(), request.getPassword())
-        );
+                new UsernamePasswordAuthenticationToken(request.getEmail(), request.getPassword()));
         User user = userRepository.findByEmailAndIsDeletedFalse(request.getEmail())
                 .orElseThrow(() -> new RuntimeException("User not found after authentication"));
         String token = jwtUtil.generateToken(user);
