@@ -36,6 +36,7 @@ public interface AppointmentRepository extends JpaRepository<Appointment, Long> 
 
     Page<Appointment> findByPatient_IdAndIsDeletedFalse(Long patientId, Pageable pageable);
     Page<Appointment> findByDoctor_IdAndIsDeletedFalse(Long doctorId, Pageable pageable);
+    Page<Appointment> findByIsDeletedFalse(Pageable pageable);
 
     /**
      * CONFLICT DETECTION QUERY
