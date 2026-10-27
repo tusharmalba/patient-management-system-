@@ -6,18 +6,24 @@ import com.pms.dto.response.AppointmentResponse;
 import com.pms.entity.Appointment;
 import com.pms.entity.Doctor;
 import com.pms.entity.Patient;
+import com.pms.entity.User;
 import com.pms.enums.AppointmentStatus;
 import com.pms.enums.AuditAction;
+import com.pms.enums.Role;
 import com.pms.exception.AppointmentConflictException;
 import com.pms.exception.ResourceNotFoundException;
 import com.pms.exception.UnauthorizedException;
 import com.pms.repository.AppointmentRepository;
 import com.pms.repository.DoctorRepository;
 import com.pms.repository.PatientRepository;
+import com.pms.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -45,6 +51,7 @@ public class AppointmentService {
     private final PatientRepository patientRepository;
     private final DoctorRepository doctorRepository;
     private final AuditService auditService;
+    private final UserRepository userRepository;
 
     // ═══════════════════════════════════════════════
     // CREATE APPOINTMENT
@@ -177,11 +184,17 @@ public class AppointmentService {
 
     @Transactional(readOnly = true)
     public AppointmentResponse getAppointmentById(Long id) {
-        return mapToResponse(getActiveAppointmentById(id));
+        Appointment appointment = getActiveAppointmentById(id);
+        requireCanView(appointment);
+        return mapToResponse(appointment);
     }
 
     @Transactional(readOnly = true)
     public Page<AppointmentResponse> getAppointmentsByPatient(Long patientId, Pageable pageable) {
+        User me = currentUser();
+        if (me.getRole() == Role.PATIENT && !findMyPatient(me).getId().equals(patientId)) {
+            throw new AccessDeniedException("You can only view your own appointments");
+        }
         return appointmentRepository
                 .findByPatient_IdAndIsDeletedFalse(patientId, pageable)
                 .map(this::mapToResponse);
@@ -189,17 +202,81 @@ public class AppointmentService {
 
     @Transactional(readOnly = true)
     public Page<AppointmentResponse> getAppointmentsByDoctor(Long doctorId, Pageable pageable) {
+        User me = currentUser();
+        if (me.getRole() == Role.DOCTOR && !findMyDoctor(me).getId().equals(doctorId)) {
+            throw new AccessDeniedException("You can only view your own schedule");
+        }
         return appointmentRepository
                 .findByDoctor_IdAndIsDeletedFalse(doctorId, pageable)
                 .map(this::mapToResponse);
+    }
+
+    /**
+     * "My appointments" - one endpoint, scoped by the caller's role:
+     *   PATIENT -> only their own      DOCTOR -> only their schedule      ADMIN -> everything
+     */
+    @Transactional(readOnly = true)
+    public Page<AppointmentResponse> getMyAppointments(Pageable pageable) {
+        User me = currentUser();
+        Page<Appointment> page;
+        if (me.getRole() == Role.PATIENT) {
+            page = appointmentRepository.findByPatient_IdAndIsDeletedFalse(findMyPatient(me).getId(), pageable);
+        } else if (me.getRole() == Role.DOCTOR) {
+            page = appointmentRepository.findByDoctor_IdAndIsDeletedFalse(findMyDoctor(me).getId(), pageable);
+        } else {
+            page = appointmentRepository.findByIsDeletedFalse(pageable);
+        }
+        return page.map(this::mapToResponse);
     }
 
     @Transactional(readOnly = true)
     public List<AppointmentResponse> getTodaysAppointments() {
         LocalDateTime startOfDay = LocalDateTime.now().toLocalDate().atStartOfDay();
         LocalDateTime endOfDay = startOfDay.plusDays(1).minusSeconds(1);
-        return appointmentRepository.findTodaysAppointments(startOfDay, endOfDay)
-                .stream().map(this::mapToResponse).collect(Collectors.toList());
+        List<Appointment> list = appointmentRepository.findTodaysAppointments(startOfDay, endOfDay);
+
+        User me = currentUser();
+        if (me.getRole() == Role.DOCTOR) {
+            Long myDoctorId = findMyDoctor(me).getId();
+            list = list.stream().filter(a -> a.getDoctor().getId().equals(myDoctorId)).collect(Collectors.toList());
+        } else if (me.getRole() == Role.PATIENT) {
+            Long myPatientId = findMyPatient(me).getId();
+            list = list.stream().filter(a -> a.getPatient().getId().equals(myPatientId)).collect(Collectors.toList());
+        }
+        return list.stream().map(this::mapToResponse).collect(Collectors.toList());
+    }
+
+    // ── helpers: who is calling, and which profile belongs to them ──
+
+    private User currentUser() {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null || !auth.isAuthenticated()) {
+            throw new AccessDeniedException("Not authenticated");
+        }
+        return userRepository.findByEmailAndIsDeletedFalse(auth.getName())
+                .orElseThrow(() -> new AccessDeniedException("User not found"));
+    }
+
+    private Patient findMyPatient(User me) {
+        return patientRepository.findByUser_IdAndIsDeletedFalse(me.getId())
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "No patient profile is linked to your account. Ask an admin to link it."));
+    }
+
+    private Doctor findMyDoctor(User me) {
+        return doctorRepository.findByUser_IdAndIsDeletedFalse(me.getId())
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "No doctor profile is linked to your account. Ask an admin to link it."));
+    }
+
+    private void requireCanView(Appointment a) {
+        User me = currentUser();
+        if (me.getRole() == Role.DOCTOR && !a.getDoctor().getId().equals(findMyDoctor(me).getId())) {
+            throw new AccessDeniedException("You can only view your own appointments");
+        }
+        if (me.getRole() == Role.PATIENT && !a.getPatient().getId().equals(findMyPatient(me).getId())) {
+            throw new AccessDeniedException("You can only view your own appointments");
+        }
     }
 
     // ═══════════════════════════════════════════════
