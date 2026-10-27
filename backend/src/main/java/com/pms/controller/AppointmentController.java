@@ -13,6 +13,7 @@ import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.data.web.PageableDefault;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -54,6 +55,15 @@ public class AppointmentController {
         return ResponseEntity.status(HttpStatus.CREATED)
                 .body(ApiResponse.success("Appointment booked successfully",
                         appointmentService.createAppointment(request)));
+    }
+
+    @GetMapping("/my")
+    @PreAuthorize("isAuthenticated()")
+    @Operation(summary = "Get MY appointments (scoped by role)",
+               description = "PATIENT: own appointments. DOCTOR: own schedule. ADMIN: all.")
+    public ResponseEntity<ApiResponse<Page<AppointmentResponse>>> getMyAppointments(
+            @PageableDefault(size = 20, sort = "appointmentTime", direction = Sort.Direction.DESC) Pageable pageable) {
+        return ResponseEntity.ok(ApiResponse.success(appointmentService.getMyAppointments(pageable)));
     }
 
     @GetMapping("/{id}")
